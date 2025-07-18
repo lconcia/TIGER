@@ -1,4 +1,3 @@
-
 # Function to return the number of the last autosome based on genome build
 TIGER_last_autosome <- function(genome_build) {
     num <- switch(genome_build,
