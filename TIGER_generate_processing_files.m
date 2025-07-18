@@ -1,359 +1,196 @@
-%% Generate fastq with all possible sequence reads of a given length per a reference genome
-
-% need a reference genome in Matlab (e.g. use fastaread to import data). Must be the same genome as used to align sequence data to. 
-% save as "<reference_name>_sequence" in folder "Alignability_and_GC_filters"
-% also save in the same file a variable "chr_length" that contains only the length in bps of each chromosome by order
-
-% need a gap file in Matlab (e.g. convert a UCSC gap file for the same genome build into Matlab, save chromosome, start, end
-
-% code generates a fastq file with all possible sequences ("reads") of a chosen length, not including gaps. Generates arbitrary read metadata
-
-
-clear;clc
-
-genome_build = 'hg19'; % hg19, hg38, mm10, dm6   % other genomes can also be used- need genome sequence and gap file, and possibly code tweeks depending on chromosome naming convention
-read_length = 100; % should be no longer than the lengths of the reads in the sequencing data, but no need to make it longer than 100
-TIGER_folder = '/TIGER';  % ! change as appropriate
-
-
-try
-   eval(['cd ' TIGER_folder '/Alignability_and_GC_filters/']) 
-catch
-    eval(['mkdir ' TIGER_folder '/Alignability_and_GC_filters/']) 
-    eval(['cd ' TIGER_folder '/Alignability_and_GC_filters/']) 
-end
-    
-eval(['mkdir ' genome_build '_' num2str(read_length) 'bp']) 
-eval(['cd '  genome_build '_' num2str(read_length) 'bp']) 
-
-% load Gap file; structure of file should be: chromosome, start, end
-switch genome_build
-    case 'hg19'
-        load Gap_hg19 Gap
-    case 'hg38'
-        load Gap_hg38 Gap 
-    case 'mm10'
-        load Mouse_Gap Gap
-    case 'dm6'
-        load dm6_Gap Gap
-end
-
-line4{1} = repmat('A',1,read_length); % arbitrary metadata
-for Chr = 1:max(Gap(:,1))
-    disp(['Chromosome ' num2str(Chr)])
-    
-    % load genome sequence  (loading the entire genome every time and only keeping one chromosome takes more time but saves computer memory) (file needs to be in the path or same folder)
-    eval(['load ' genome_build '_sequence Sequence']) 
-    Use_sequence = Sequence{Chr};
-    clear Sequence
-    
-    % remove gaps
-    G = Gap(Gap(:,1)==Chr,2:3);
-    for i = size(G,1):-1:1
-        Use_sequence(G(i,1)+1:G(i,2)) = [];
-    end
-    clear G i
-    
-
-    % write fastq file
-    filename = cell2mat(['Chr' chrnum(Chr,genome_build) '_' num2str(read_length) 'bp_R1.fastq']);
-    fid = fopen(filename, 'w');
-    line1txt = ['@NB551191:189:HTHCVBGX5:1:11101:' num2str(Chr) ':%d']; % arbitrary initial parameters, followed by chromosome and coordinate
-
-    % generate sequence reads [ordered by location]
-    lh = waitbar(0,['Chr' chrnum(Chr)]);  % chrnum coverts chromosome index number to naming convention (e.g. 23 to X)
-    cnt = 0;
-    for i = 1:read_length
-        waitbar(i/read_length,lh)
-        clear Fast_I
-        seq_length_use = length(Use_sequence)-rem((length(Use_sequence)-i+1),read_length);
-        seqs_temp = ( reshape( Use_sequence(i:seq_length_use),read_length,floor(seq_length_use/read_length) ) )';
-        Seqs = cellstr(seqs_temp);
-
-        seq_texts = compose(line1txt,(cnt+1:cnt+length(seqs_temp))');
-        Fast_I(1:4:length(Seqs)*4,1) = seq_texts;
-        Fast_I(2:4:length(Seqs)*4,1) = Seqs;
-        Fast_I(3:4:length(Seqs)*4,1) = {'+'}; %line3; arbitrary
-        Fast_I(4:4:length(Seqs)*4,1) = line4;
-        
-        fprintf(fid,'%s\n',Fast_I{:});
-        
-        cnt = cnt+length(seqs_temp);
-    end
-    close(lh)
-    eval(['gzip ' filename]) % gzips the file - input for bwa is gzipped
-    eval(['delete ' filename]) % delete the original
-    fclose('all'); 
-    clear fid Fast_I A line1 cnt seqs_temp seq_length_use seq_texts lh Seqs filename i
-    
-end
-
-
-eval(['cd ' TIGER_folder])
-
-
-
-%% Align fastq and extract alignment information
-% This part typically performed on a computer server
-
-
-% 1. copy fastq files to server
-
-% 2. use BWA-MEM to align to reference genome with duplicates marked. Should be the exact same reference used to generate the fastq files. 
-
-% 3. After alignment, extract the locations of reads that were uniquely aligned (change chromosomes and read length if needed):
-% for i in {1..22} X Y; do echo $i; samtools view -F 4 -F 16 -F 1024 -q 1  Chr${i}_100bp.bam ${i} | cut -f 4 > Chr${i}_100bp_filt.txt; done
-%  - or - (reads are labeled "chrXX", e.g. hg38, mm10)
-% for i in {1..22} X Y; do echo $i; samtools view -F 4 -F 16 -F 1024 -q 1  Chr${i}_100bp.bam chr${i} | cut -f 4 > Chr${i}_100bp_filt.txt; done
-%  - or - (drosophila)
-% for i in 2L 2R 3L 3R 4 X Y; do echo $i; samtools view -F 4 -F 16 -F 1024 -q 1  Chr${i}_100bp.bam chr${i} | cut -f 4 > Chr${i}_100bp_filt.txt; done
-
-% (-F 4: read unmapped; -F 16: read reverse strand (only the forward strand was written to fastq); -F 1024: PCR or optical duplicate; -q 1: only keep sequences with mapQ of 1 or more; -f 4: only extract the start position of the sequence)
-
-
-
-% * can then delete fastq files from computer and from server *
-
-
-
-%% Import alignment samtools output to Matlab, save coordinates to remove 
-% this codes generates the alignability filter- list of coordinates that are not uniquely alignable
-clear;clc
-
-genome_build = 'hg19'; % hg19, hg38, mm10, dm6
-read_length = 100; 
-TIGER_folder = '/TIGER';  % ! change as appropriate
-
-eval(['cd ' TIGER_folder '/Alignability_and_GC_filters/' genome_build '_' num2str(read_length) 'bp']) 
-
-
-% load file with chromosome lengths
-eval(['load ' TIGER_folder '/Alignability_and_GC_filters/' genome_build '_sequence chr_length'])
-% remove "extra" chromosomes (e.g. unmapped contigs)
-switch genome_build 
-    case 'hg19'
-        chr_length = chr_length(1:24);
-    case 'hg38'
-        chr_length = chr_length(1:24);
-    case 'mm10'
-        chr_length = chr_length(1:21);
-end
-
-
-for Chr = 1:length(chr_length)
-    disp(['Chromosome ' num2str(Chr)])
-    switch genome_build 
-        case 'mm10'
-            filename = cell2mat(['Chr' chrnum(Chr,'mm10') '_' num2str(read_length) 'bp_filt.txt']); % chrnum coverts chromosome index number to naming convention (e.g. 23 to X) 
-        case 'dm6'
-            filename = cell2mat(['Chr' chrnum(Chr,'dm6') '_' num2str(read_length) 'bp_filt.txt']);
-        otherwise
-            filename = cell2mat(['Chr' chrnum(Chr) '_' num2str(read_length) 'bp_filt.txt']);
-    end
-    fid = fopen(filename);
-    Coordinates = textscan(fid,'%f');  % read coordinate
-    fclose('all'); clear fid filename
-
-    Coordinates_to_remove{Chr,1}(:,1) = setdiff(1:chr_length(Chr),Coordinates{1}); % all genomic coordinates that are not uniquely alignable
-    clear Coordinates
-end
-
-
-eval(['save -v7.3 Coordinates_to_remove_' genome_build '_' num2str(read_length) 'bp Coordinates_to_remove'])
-
-
-eval(['cd ' TIGER_folder])
-
-
-%  * can then delete samtools files from server and from computer *
-
-
-
-%% Define genomic DNA copy number windows from alignability filter coordinates to remove 
-% This code defines the windows in which read numbers will be counted ("read number windows").
-% smaller windows can be merged to larger ones (function "merge_windows") but not vice versa. Downside of using smaller windows is larger files, longer processing times and higher memory usage
-clear;clc
-
-genome_build = 'hg19'; % hg19, hg38, mm10, dm6
-read_length = 100; 
-win_size = 10000; % this will be the size of the windows in uniquely-alignable bps
-TIGER_folder = '/TIGER';  % ! change as appropriate
-
-
-eval(['cd ' TIGER_folder '/Alignability_and_GC_filters/' genome_build '_' num2str(read_length) 'bp']) 
-eval(['load Coordinates_to_remove_' genome_build '_' num2str(read_length) 'bp']) % load alignability filter
-
-
-% load file with chromosome lengths
-eval(['load ' TIGER_folder '/Alignability_and_GC_filters/' genome_build '_sequence chr_length'])
-switch genome_build
-    case 'hg19'
-        chr_length = chr_length(1:24); 
-        load Gap_hg19 Gap
-    case 'hg38'
-        chr_length = chr_length(1:24); 
-        load Gap_hg38 Gap 
-    case 'mm10'
-        chr_length = chr_length(1:21);
-        load Mouse_Gap Gap
-    case 'dm6'
-        load dm6_Gap Gap        
-end
-
-
-for Chr = 1:length(chr_length)
-    disp(['Chromosome ' num2str(Chr)])
-    kept_coordinates = setdiff(1:chr_length(Chr),Coordinates_to_remove{Chr});
-    Wins{Chr,1}(:,2) = kept_coordinates(1:win_size:end-win_size+1); % start 
-    Wins{Chr,1}(:,3) = kept_coordinates(win_size+1:win_size:end)-1; % end
-    Wins{Chr,1}(:,1) = Chr;
-    Wins{Chr,1}(:,4) = round(mean(Wins{Chr}(:,2:3)')'); % window center
-    
-    % remove windows that span gaps
-    G = Gap(Gap(:,1)==Chr,2:3);
-    in = [];
-    for i = 1:size(G,1)
-        in = [in;find(Wins{Chr,1}(:,2)<= G(i,1) & Wins{Chr,1}(:,3)>= G(i,2))];
-    end
-    Wins{Chr}(in,:) = [];
-    
-end
-
-
-eval(['save ' genome_build '_' num2str(read_length) 'bp_wins_'   num2str(win_size)  ' Wins'])
-
-
-eval(['cd ' TIGER_folder])
-
-
-
-%% GC content normalization (files for calculating "expected" number of reads) 
-% Calculates GC content in 401 bp disregarding Ns
-% Saves files ("xbp_GC_cont_401_filtered_bins_chrx") with all the genomic coordinates (after alignability filter) that belong to each of the 401 GC% bins
-% Saves "Reads_expected_nominal"- number of bps in each GC bin in each read number window
-clear;clc
-
-genome_build = 'hg19'; % hg19, hg38, mm10, dm6
-read_length = 100;
-win_size = 10000; % only needed for the last part of the code
-TIGER_folder = '/TIGER';  % ! change as appropriate
-
-
-eval(['cd ' TIGER_folder '/Alignability_and_GC_filters/' genome_build '_' num2str(read_length) 'bp']) 
-eval(['load Coordinates_to_remove_' genome_build '_' num2str(read_length) 'bp']) % load alignability filter
-
-% load window coordinates
-eval(['load ' genome_build '_' num2str(read_length) 'bp_wins_'   num2str(win_size)])
-if strcmp(genome_build,'mm10')
-    Wins = Wins(1:20); % no unique sequences on the Y chromosome
-end
-
-% load genome sequence
-eval(['load ' TIGER_folder '/Alignability_and_GC_filters/' genome_build '_sequence Sequence'])
-
-
-
-        
-bins = 0:1/400:1;  
-bins = round(bins*10000)/10000; % prevents cases in which the value of bins isn't exact
-for Chr = 1:size(Wins,1)
-    disp(['Chromosome ' num2str(Chr)])
-
-    %%%%%%%   calculate GC content for all bps in the genome [% all alignable bp] %%%%%
-    Use_sequence = Sequence{Chr};
-    GC_cont_win_chr(:,1) = 201:length(Use_sequence)-200;
-
-    % GC content for each bps
-    GC_sequence = zeros(length(Use_sequence),1);
-    GC_sequence(upper(Use_sequence)=='G' | upper(Use_sequence)=='C') = 1;
-    GC_sequence_sum = cumsum(GC_sequence);
-    GC_sequence_sum = [GC_sequence_sum(401); GC_sequence_sum(402:end)-GC_sequence_sum(1:end-401)];
-    GC_sequence_sum = GC_sequence_sum-GC_sequence(201:end-200); % exclude the center position (the one actually tested)
-    
-    % number of non-Ns in each GC window
-    Non_N = ones(length(Use_sequence),1);
-    Non_N(upper(Use_sequence)=='N') = 0;
-    Non_N_sum = cumsum(Non_N);
-    Non_N_sum = [Non_N_sum(401);Non_N_sum(402:end)-Non_N_sum(1:end-401)];
-    Non_N_sum = Non_N_sum-Non_N(201:end-200);
-    
-    GC_cont_win_chr(:,2) = NaN;
-    in = find(Non_N_sum==400); % ignore GC windows that contain any Ns
-    GC_cont_win_chr(in,2) = GC_sequence_sum(in)./Non_N_sum(in);
-
-
-    %%%% filter for alignabilty  %%%%
-    [~, in] = intersect(GC_cont_win_chr(:,1),Coordinates_to_remove{Chr});
-    GC_cont_win_chr(in,:) = [];
-    in = find(isnan(GC_cont_win_chr(:,2)));
-    GC_cont_win_chr(in,:) = [];    
-    
-
-    % find the genomic coordinates that belong to each of the 401 GC% bins
-    lh = waitbar(0,'wait');
-    for i = 1:length(bins)
-        waitbar(i/length(bins),lh)
-        in = find(GC_cont_win_chr(:,2)==bins(i));
-        GC_cont_win_chr_bins{i,1} = GC_cont_win_chr(in,1);
-    end
-    close(lh)
-    
-    eval(['save -v7.3 ' genome_build '_' num2str(read_length) 'bp_GC_cont_401_filtered_bins_chr' num2str(Chr) ' GC_cont_win_chr_bins'])
-    
-
-
-
-    %%%%%% count number of bps in each GC bin in each read number window- creates variable "Reads_expected_nominal"  %%%%%
-    win_coord = [Wins{Chr}(:,2);Wins{Chr}(end,3)];
-    for GC_bin = 1:401
-        Reads_expected_nominal{Chr,1}(:,GC_bin)  =  histcounts(GC_cont_win_chr_bins{GC_bin},win_coord); % in each TIGER window, how many bp are found in each GC bin (in the genome)
-    end
-    Reads_expected_nominal{Chr}(:,402) = nansum(Reads_expected_nominal{Chr}'); % this is for testing purposes only. Gets overwritten later. column 402 should be the same as the win_size for most or all windows
-    
-    clear GC_cont_win_chr GC_cont_win_chr_bins
-end
-
-
-eval(['save -v7.3 ' genome_build '_' num2str(read_length) 'bp_' num2str(win_size) 'bp_wins_Reads_expected_nominal_401 Reads_expected_nominal'])   
-
-
-eval(['cd ' TIGER_folder])
-
-
-
-%% Optional: calculate Reads_expected_nominal for additional windows sizes
-% For processing files with non-default read number windows, can run just this (GC% coordinate files stay the same) 
-clear;clc
-
-genome_build = 'hg19'; % hg19, hg38, mm10, dm6
-read_length = 100;
-win_size = 10000; 
-TIGER_folder = '/TIGER';  % ! change as appropriate
-
-
-eval(['cd ' TIGER_folder '/Alignability_and_GC_filters/' genome_build '_' num2str(read_length) 'bp']) 
-
-% load window coordinates
-eval(['load ' genome_build '_' num2str(read_length) 'bp_wins_'   num2str(win_size)])
-if strcmp(genome_build,'mm10')
-    Wins = Wins(1:20); % no unique sequences on the Y chromosome
-end
-
-
-for Chr = 1:size(Wins,1)
-    disp(['Chromosome ' num2str(Chr)])
-    eval(['load ' genome_build '_' num2str(read_length) 'bp_GC_cont_401_filtered_bins_chr' num2str(Chr)])
-    win_coord = [Wins{Chr}(:,2);Wins{Chr}(end,3)];
-    for GC_bin = 1:401
-        Reads_expected_nominal{Chr,1}(:,GC_bin)  =  histcounts(GC_cont_win_chr_bins{GC_bin},win_coord); % in each TIGER window, how many bp are found in each GC bin (in the genome)
-    end
-    Reads_expected_nominal{Chr}(:,402) = nansum(Reads_expected_nominal{Chr}'); % this is for testing purposes only. Gets overwritten later
-    
-    clear GC_cont_win_chr GC_cont_win_chr_bins
-end
-
-eval(['save -v7.3 ' genome_build '_' num2str(read_length) 'bp_' num2str(win_size) 'bp_wins_Reads_expected_nominal_401 Reads_expected_nominal'])   
-
-
-eval(['cd ' TIGER_folder])
-
+# ---- Setup and Parameters ----
+library(Biostrings)
+library(data.table)
+library(stringr)
+library(R.utils)
+
+genome_build <- "hg19"
+read_length <- 100
+TIGER_folder <- "/TIGER"
+
+# ---- Helper: chromosome naming ----
+chrnum <- function(chr, genome_build = "hg19") {
+  # Map integer to chr string, e.g. 23 -> X
+  if (chr == 23) return("X")
+  if (chr == 24) return("Y")
+  return(as.character(chr))
+}
+
+# ---- 1. Generate FASTQ with all possible reads ----
+# Assumes you have: 
+# - an RData file with a named list "Sequence" (chromosome strings) and "chr_length" (integer vector, by index)
+# - a gap data.frame or matrix Gap: columns (chromosome, start, end)
+
+setwd(file.path(TIGER_folder, "Alignability_and_GC_filters"))
+outdir <- sprintf("%s_%dbp", genome_build, read_length)
+if (!dir.exists(outdir)) dir.create(outdir)
+setwd(outdir)
+
+# Load gap file
+gap_file <- switch(genome_build,
+  "hg19" = "Gap_hg19.RData",
+  "hg38" = "Gap_hg38.RData",
+  "mm10" = "Mouse_Gap.RData",
+  "dm6"  = "dm6_Gap.RData"
+)
+load(gap_file) # expects Gap variable: data.frame/matrix with columns: chromosome, start, end
+
+# Load sequence/chr_length
+load(sprintf("%s_sequence.RData", genome_build)) # expects Sequence (list of DNAStrings), chr_length (integer vector)
+
+arbitrary_qual <- paste(rep("A", read_length), collapse = "")
+
+for (Chr in unique(Gap[,1])) {
+  cat("Chromosome", Chr, "\n")
+  Use_sequence <- Sequence[[Chr]]
+  G <- Gap[Gap[,1] == Chr, 2:3, drop=FALSE]
+  
+  # Remove gaps (set to N)
+  for (i in seq(nrow(G),1)) {
+    subseq(Use_sequence, G[i,1]+1, G[i,2]) <- DNAString(paste(rep("N", G[i,2]-G[i,1]+1), collapse=""))
+  }
+  seq_len <- length(Use_sequence)
+  
+  # Write FASTQ file
+  fq_file <- sprintf("Chr%s_%dbp_R1.fastq", chrnum(Chr, genome_build), read_length)
+  fq_conn <- file(fq_file, "w")
+  nreads_total <- 0
+  pb <- txtProgressBar(min=1, max=read_length, style=3)
+  
+  for (i in 1:read_length) {
+    setTxtProgressBar(pb, i)
+    # Make sure length is divisible by read_length
+    seq_index <- i:(seq_len - ((seq_len-i+1) %% read_length))
+    if (length(seq_index) < read_length) next
+    matrix_reads <- matrix(as.character(Use_sequence[seq_index]), ncol=read_length, byrow=TRUE)
+    seqs <- apply(matrix_reads, 1, paste, collapse="")
+    for (j in seq_along(seqs)) {
+      cat(sprintf("@NB551191:189:HTHCVBGX5:1:11101:%d:%d\n%s\n+\n%s\n",
+                  Chr, nreads_total+j, seqs[j], arbitrary_qual),
+          file=fq_conn)
+    }
+    nreads_total <- nreads_total + length(seqs)
+  }
+  close(pb)
+  close(fq_conn)
+  gzip(fq_file, destname=paste0(fq_file, ".gz"), overwrite=TRUE)
+  file.remove(fq_file)
+}
+
+setwd(TIGER_folder)
+
+# ---- 2. Import samtools output, generate alignability filter ----
+
+setwd(file.path(TIGER_folder, "Alignability_and_GC_filters", outdir))
+load(sprintf("%s_sequence.RData", genome_build)) # loads chr_length
+if (genome_build %in% c("hg19", "hg38")) chr_length <- chr_length[1:24]
+if (genome_build == "mm10") chr_length <- chr_length[1:21]
+
+Coordinates_to_remove <- vector("list", length(chr_length))
+for (Chr in seq_along(chr_length)) {
+  cat("Chromosome", Chr, "\n")
+  filename <- sprintf("Chr%s_%dbp_filt.txt", chrnum(Chr, genome_build), read_length)
+  if (!file.exists(filename)) stop(paste("Missing file:", filename))
+  Coordinates <- scan(filename, what=integer(), quiet=TRUE)
+  all_coords <- seq_len(chr_length[Chr])
+  Coordinates_to_remove[[Chr]] <- setdiff(all_coords, Coordinates)
+}
+save(Coordinates_to_remove, file=sprintf("Coordinates_to_remove_%s_%dbp.RData", genome_build, read_length))
+setwd(TIGER_folder)
+
+# ---- 3. Define read number windows ----
+
+setwd(file.path(TIGER_folder, "Alignability_and_GC_filters", outdir))
+load(sprintf("Coordinates_to_remove_%s_%dbp.RData", genome_build, read_length))
+load(sprintf("%s_sequence.RData", genome_build)) # chr_length
+if (genome_build %in% c("hg19", "hg38")) chr_length <- chr_length[1:24]
+if (genome_build == "mm10") chr_length <- chr_length[1:21]
+load(gap_file) # Gap
+
+Wins <- list()
+for (Chr in seq_along(chr_length)) {
+  cat("Chromosome", Chr, "\n")
+  kept_coords <- setdiff(seq_len(chr_length[Chr]), Coordinates_to_remove[[Chr]])
+  starts <- kept_coords[seq(1, length(kept_coords)-win_size+1, by=win_size)]
+  ends   <- kept_coords[seq(win_size, length(kept_coords), by=win_size)]
+  nwin <- min(length(starts), length(ends))
+  wins_chr <- data.frame(chr=Chr, start=starts[1:nwin], end=ends[1:nwin],
+                         center=round(rowMeans(cbind(starts[1:nwin],ends[1:nwin]))))
+  # Remove windows that span gaps
+  G <- Gap[Gap[,1]==Chr,2:3,drop=FALSE]
+  if (nrow(G) > 0) {
+    toremove <- integer(0)
+    for (i in 1:nrow(G)) {
+      in_gap <- which(wins_chr$start <= G[i,1] & wins_chr$end >= G[i,2])
+      toremove <- c(toremove, in_gap)
+    }
+    if (length(toremove) > 0) wins_chr <- wins_chr[-unique(toremove),]
+  }
+  Wins[[Chr]] <- wins_chr
+}
+save(Wins, file=sprintf("%s_%dbp_wins_%d.RData", genome_build, read_length, win_size))
+setwd(TIGER_folder)
+
+# ---- 4. GC content normalization bins and Reads_expected_nominal ----
+
+setwd(file.path(TIGER_folder, "Alignability_and_GC_filters", outdir))
+load(sprintf("Coordinates_to_remove_%s_%dbp.RData", genome_build, read_length))
+load(sprintf("%s_%dbp_wins_%d.RData", genome_build, read_length, win_size))
+if (genome_build == "mm10") Wins <- Wins[1:20]
+load(sprintf("%s_sequence.RData", genome_build)) # Sequence
+
+bins <- round(seq(0, 1, by=1/400), 4)
+Reads_expected_nominal <- list()
+for (Chr in seq_along(Wins)) {
+  cat("Chromosome", Chr, "\n")
+  Use_sequence <- Sequence[[Chr]]
+  nseq <- length(Use_sequence)
+  GC_cont_win_chr <- data.frame(coord=201:(nseq-200), GC=NA)
+  GC_vec <- as.numeric(Use_sequence == "G" | Use_sequence == "C" | Use_sequence == "g" | Use_sequence == "c")
+  GC_cumsum <- cumsum(GC_vec)
+  GC_window <- GC_cumsum[401:length(GC_cumsum)] - GC_cumsum[1:(length(GC_cumsum)-400)]
+  NonN_vec <- as.numeric(Use_sequence != "N" & Use_sequence != "n")
+  NonN_cumsum <- cumsum(NonN_vec)
+  NonN_window <- NonN_cumsum[401:length(NonN_cumsum)] - NonN_cumsum[1:(length(NonN_cumsum)-400)]
+  in_good <- which(NonN_window == 400)
+  GC_cont_win_chr$GC[in_good] <- GC_window[in_good]/400
+  
+  # Filter for alignability
+  coords_to_remove <- Coordinates_to_remove[[Chr]]
+  GC_cont_win_chr <- GC_cont_win_chr[!(GC_cont_win_chr$coord %in% coords_to_remove),]
+  GC_cont_win_chr <- GC_cont_win_chr[!is.na(GC_cont_win_chr$GC),]
+  
+  # Assign to GC bins
+  GC_cont_win_chr_bins <- vector("list", length(bins))
+  pb <- txtProgressBar(min=1, max=length(bins), style=3)
+  for (i in seq_along(bins)) {
+    setTxtProgressBar(pb, i)
+    in_bin <- which(abs(GC_cont_win_chr$GC - bins[i]) < 1e-6)
+    GC_cont_win_chr_bins[[i]] <- GC_cont_win_chr$coord[in_bin]
+  }
+  close(pb)
+  save(GC_cont_win_chr_bins, file=sprintf("%s_%dbp_GC_cont_401_filtered_bins_chr%d.RData", genome_build, read_length, Chr))
+  
+  # Reads_expected_nominal
+  win_coord <- c(Wins[[Chr]]$start, Wins[[Chr]]$end[nrow(Wins[[Chr]])])
+  Reads_chr <- matrix(0, nrow=nrow(Wins[[Chr]]), ncol=401)
+  for (GC_bin in 1:401) {
+    Reads_chr[,GC_bin] <- hist(GC_cont_win_chr_bins[[GC_bin]], breaks=win_coord, plot=FALSE)$counts
+  }
+  Reads_chr <- cbind(Reads_chr, rowSums(Reads_chr))
+  Reads_expected_nominal[[Chr]] <- Reads_chr
+}
+save(Reads_expected_nominal, file=sprintf("%s_%dbp_%dbp_wins_Reads_expected_nominal_401.RData",
+                                          genome_build, read_length, win_size))
+setwd(TIGER_folder)
+
+
+# Explanation and notes:
+# 
+# - Each block translates the core MATLAB logic for that section.
+# - Sequence should be a list of DNAString objects (from Biostrings); chr_length an integer vector.
+# - Gap is expected to be a data.frame or matrix as in MATLAB.
+# - This code does not include every possible error check (e.g., file existence, correct structure) but covers the main translation.
+# - For the (optional) "additional window sizes" code, simply rerun the last block with different win_size and use existing GC bin files.
+# - The alignment and filtering steps (samtools, BWA) remain as shell commands, not directly translatable to R.
+# - If you need to read/write .mat files instead of .RData, use the R.matlab package.
