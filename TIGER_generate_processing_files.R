@@ -79,7 +79,9 @@ for (Chr in unique(Gap[,1])) {
 
 setwd(TIGER_folder)
 
-# ---- 2. Import samtools output, generate alignability filter ----
+# ---- 2. Import samtools output, generate alignability filter ----  ## line 199 in TIGER_generate_processing_files.m
+#  this codes generates the alignability filter- list of coordinates that are not uniquely alignable
+# imports the output of generate_chromosome_mappability_mask.EDIT.sh
 
 setwd(file.path(TIGER_folder, "Alignability_and_GC_filters", outdir))
 load(sprintf("%s_sequence.RData", genome_build)) # loads chr_length
