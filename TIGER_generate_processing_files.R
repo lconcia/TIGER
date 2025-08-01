@@ -1,8 +1,71 @@
+# %% Generate fastq with all possible sequence reads of a given length per a reference genome
+
+# % need a reference genome in Matlab (e.g. use fastaread to import data). Must be the same genome as used to align sequence data to. 
+# % save as "<reference_name>_sequence" in folder "Alignability_and_GC_filters"
+# % also save in the same file a variable "chr_length" that contains only the length in bps of each chromosome by order
+
+# % need a gap file in Matlab (e.g. convert a UCSC gap file for the same genome build into Matlab, save chromosome, start, end
+  
+# % code generates a fastq file with all possible sequences ("reads") of a chosen length, not including gaps. Generates arbitrary read metadata
+
+
+# clear;clc
+
+# genome_build = 'hg19'; % hg19, hg38, mm10, dm6   % other genomes can also be used- need genome sequence and gap file, and possibly code tweeks depending on chromosome naming convention
+# read_length = 100; % should be no longer than the lengths of the reads in the sequencing data, but no need to make it longer than 100
+# TIGER_folder = '/TIGER';  % ! change as appropriate
+
+# Clear the environment (equivalent to MATLAB's `clear`)
+rm(list = ls())
+
+# Clear the console (equivalent to MATLAB's `clc`)
+cat("\014")  # This sends a form feed character to the console, which clears it in most R environments like RStudio
+
+# Define parameters
+genome_build <- 'hg19'  # Options: 'hg19', 'hg38', 'mm10', 'dm6'
+# Other genomes can also be used—need genome sequence and gap file, and possibly code tweaks depending on chromosome naming convention
+read_length <- 100  # Should be no longer than the lengths of the reads in the sequencing data, but no need to make it longer than 100
+TIGER_folder <- '/TIGER' 
+
+# try
+#   eval(['cd ' TIGER_folder '/Alignability_and_GC_filters/']) 
+#catch
+#    eval(['mkdir ' TIGER_folder '/Alignability_and_GC_filters/']) 
+#    eval(['cd ' TIGER_folder '/Alignability_and_GC_filters/']) 
+# end
+    
+# eval(['mkdir ' genome_build '_' num2str(read_length) 'bp']) 
+# eval(['cd '  genome_build '_' num2str(read_length) 'bp']) 
+
+
+# Construct the path to Alignability_and_GC_filters
+alignability_path <- file.path(TIGER_folder, 'Alignability_and_GC_filters')
+
+# Try to set working directory, create if it doesn't exist
+if (!dir.exists(alignability_path)) {
+  dir.create(alignability_path, recursive = TRUE)
+}
+setwd(alignability_path)
+
+# Create and move into genome_build_readLength directory
+subfolder_name <- paste0(genome_build, "_", read_length, "bp")
+if (!dir.exists(subfolder_name)) {
+  dir.create(subfolder_name)
+}
+setwd(subfolder_name)
+
+
+##########################################
+
+                             
 # ---- Setup and Parameters ----
 library(Biostrings)
 library(data.table)
 library(stringr)
 library(R.utils)
+
+
+
 
 genome_build <- "hg19"
 read_length <- 100
@@ -79,11 +142,23 @@ for (Chr in unique(Gap[,1])) {
 
 setwd(TIGER_folder)
 
+genome_build <- 'hg19'  # Options: 'hg19', 'hg38', 'mm10', 'dm6'
+read_length <- 100
+TIGER_folder <- '/TIGER'  # Change as appropriate
+
+# Construct the path
+path <- file.path(TIGER_folder, paste0('Alignability_and_GC_filters/', genome_build, '_', read_length, 'bp'))
+
+# Change working directory
+setwd(path)
+
+
 # ---- 2. Import samtools output, generate alignability filter ----  
 ## line 119 in TIGER_generate_processing_files.m
 %% Import alignment samtools output to Matlab, save coordinates to remove 
 #  this codes generates the alignability filter- list of coordinates that are not uniquely alignable
 # imports the output of generate_chromosome_mappability_mask.EDIT.sh
+
 
 setwd(file.path(TIGER_folder, "Alignability_and_GC_filters", outdir))
 load(sprintf("%s_sequence.RData", genome_build)) # loads chr_length
